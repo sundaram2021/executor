@@ -1,7 +1,6 @@
 import { HttpApi, HttpApiBuilder } from "effect/unstable/httpapi";
 import { HttpServerResponse } from "effect/unstable/http";
 import { Duration, Effect, Predicate } from "effect";
-import { setCookie, deleteCookie } from "@tanstack/react-start/server";
 
 import {
   AUTH_PATHS,
@@ -10,21 +9,23 @@ import {
   McpExecutionNotFoundError,
   McpSessionForbiddenError,
 } from "./api";
-import { NoOrganization, SessionContext } from "./middleware";
+import { NoOrganization } from "@executor-js/api/server";
+import { SessionContext, SessionCookies } from "./middleware";
 import { UserStoreService } from "./context";
-import { authorizeOrganization } from "./authorize-organization";
 import { env } from "cloudflare:workers";
-import { ApiKeyManagementError } from "./api-key-errors";
 import { WorkOSError } from "./errors";
-import { WorkOSAuth } from "./workos";
-import { ApiKeyService } from "./api-keys";
-import { AutumnService } from "../services/autumn";
+import { WorkOSClient } from "./workos";
+import { AutumnService } from "../extensions/billing/service";
 import {
   hasPaidOrganizationSubscription,
   isOverFreeOrganizationLimit,
   shouldApplyFreeOrganizationLimit,
-} from "./organization-limits";
-import type { McpSessionApprovalResult, McpSessionResumeApprovalResult } from "../mcp-session";
+} from "../extensions/billing/plans";
+import { authorizeOrganization } from "./organization";
+import type {
+  McpSessionApprovalResult,
+  McpSessionResumeApprovalResult,
+} from "../mcp/session-durable-object";
 
 const COOKIE_OPTIONS = {
   path: "/",
@@ -62,8 +63,6 @@ const DELETE_COOKIE_OPTIONS = {
   secure: true,
 };
 
-const MAX_API_KEY_NAME_LENGTH = 80;
-
 const randomState = (): string => {
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
@@ -78,16 +77,6 @@ const timingSafeEqual = (a: string, b: string): boolean => {
   }
   return diff === 0;
 };
-
-const requireSessionOrganization = Effect.gen(function* () {
-  const session = yield* SessionContext;
-  if (!session.organizationId) {
-    return yield* new NoOrganization();
-  }
-  const org = yield* authorizeOrganization(session.accountId, session.organizationId);
-  if (!org) return yield* new NoOrganization();
-  return { session, org };
-});
 
 const requireSessionOrganizationId = Effect.gen(function* () {
   const session = yield* SessionContext;
@@ -156,7 +145,7 @@ export const CloudAuthPublicHandlers = HttpApiBuilder.group(
     handlers
       .handleRaw("login", () =>
         Effect.gen(function* () {
-          const workos = yield* WorkOSAuth;
+          const workos = yield* WorkOSClient;
           // Use the explicit public site URL — in dev, the request's Host
           // header points at the internal proxy target, not the public URL
           // WorkOS needs to redirect back to.
@@ -173,7 +162,7 @@ export const CloudAuthPublicHandlers = HttpApiBuilder.group(
       )
       .handleRaw("callback", ({ request, query }) =>
         Effect.gen(function* () {
-          const workos = yield* WorkOSAuth;
+          const workos = yield* WorkOSClient;
           const users = yield* UserStoreService;
           const cookieState = request.cookies[STATE_COOKIE] ?? null;
           // CSRF check is only enforced when the redirect carries a state
@@ -262,13 +251,14 @@ export const CloudSessionAuthHandlers = HttpApiBuilder.group(
           };
         }),
       )
-      .handleRaw("logout", () => {
-        deleteCookie("wos-session", { path: "/" });
-        return Effect.succeed(HttpServerResponse.redirect("/", { status: 302 }));
-      })
+      .handleRaw("logout", () =>
+        Effect.succeed(
+          deleteResponseCookie(HttpServerResponse.redirect("/", { status: 302 }), "wos-session"),
+        ),
+      )
       .handle("organizations", () =>
         Effect.gen(function* () {
-          const workos = yield* WorkOSAuth;
+          const workos = yield* WorkOSClient;
           const session = yield* SessionContext;
 
           const memberships = yield* workos.listUserMemberships(session.accountId);
@@ -290,7 +280,7 @@ export const CloudSessionAuthHandlers = HttpApiBuilder.group(
       )
       .handle("switchOrganization", ({ payload }) =>
         Effect.gen(function* () {
-          const workos = yield* WorkOSAuth;
+          const workos = yield* WorkOSClient;
           const session = yield* SessionContext;
 
           const refreshed = yield* workos.refreshSession(
@@ -298,13 +288,13 @@ export const CloudSessionAuthHandlers = HttpApiBuilder.group(
             payload.organizationId,
           );
           if (refreshed) {
-            setCookie("wos-session", refreshed, COOKIE_OPTIONS);
+            (yield* SessionCookies).set("wos-session", refreshed, RESPONSE_COOKIE_OPTIONS);
           }
         }),
       )
       .handle("createOrganization", ({ payload }) =>
         Effect.gen(function* () {
-          const workos = yield* WorkOSAuth;
+          const workos = yield* WorkOSClient;
           const users = yield* UserStoreService;
           const session = yield* SessionContext;
           const autumn = yield* AutumnService;
@@ -365,17 +355,17 @@ export const CloudSessionAuthHandlers = HttpApiBuilder.group(
                 verifiedOrgId: verified?.organizationId ?? null,
               },
             );
-            deleteCookie("wos-session", { path: "/" });
+            (yield* SessionCookies).set("wos-session", "", DELETE_COOKIE_OPTIONS);
             return yield* new WorkOSError();
           }
 
-          setCookie("wos-session", refreshed, COOKIE_OPTIONS);
+          (yield* SessionCookies).set("wos-session", refreshed, RESPONSE_COOKIE_OPTIONS);
           return { id: org.id, name: org.name };
         }),
       )
       .handle("pendingInvitations", () =>
         Effect.gen(function* () {
-          const workos = yield* WorkOSAuth;
+          const workos = yield* WorkOSClient;
           const session = yield* SessionContext;
 
           const invitations = yield* workos.listInvitationsByEmail(session.email);
@@ -424,7 +414,7 @@ export const CloudSessionAuthHandlers = HttpApiBuilder.group(
       )
       .handle("acceptInvitation", ({ payload }) =>
         Effect.gen(function* () {
-          const workos = yield* WorkOSAuth;
+          const workos = yield* WorkOSClient;
           const users = yield* UserStoreService;
           const session = yield* SessionContext;
 
@@ -454,43 +444,16 @@ export const CloudSessionAuthHandlers = HttpApiBuilder.group(
           if (!refreshed || !verified || verified.organizationId !== org.id) {
             yield* Effect.logWarning("acceptInvitation: unable to attach org to current session", {
               userId: session.accountId,
-              orgId: org.id,
+              organizationId: org.id,
               refreshReturnedSession: refreshed != null,
               verifiedOrgId: verified?.organizationId ?? null,
             });
-            deleteCookie("wos-session", { path: "/" });
+            (yield* SessionCookies).set("wos-session", "", DELETE_COOKIE_OPTIONS);
             return yield* new WorkOSError();
           }
 
-          setCookie("wos-session", refreshed, COOKIE_OPTIONS);
+          (yield* SessionCookies).set("wos-session", refreshed, RESPONSE_COOKIE_OPTIONS);
           return { id: org.id, name: org.name };
-        }),
-      )
-      .handle("listApiKeys", () =>
-        Effect.gen(function* () {
-          const { session, org } = yield* requireSessionOrganization;
-          const apiKeys = yield* ApiKeyService;
-          const keys = yield* apiKeys.listUserKeys({
-            accountId: session.accountId,
-            organizationId: org.id,
-          });
-          return { apiKeys: keys };
-        }),
-      )
-      .handle("createApiKey", ({ payload }) =>
-        Effect.gen(function* () {
-          const { session, org } = yield* requireSessionOrganization;
-          const name = payload.name.trim().slice(0, MAX_API_KEY_NAME_LENGTH);
-          if (!name) {
-            return yield* new ApiKeyManagementError({ cause: "missing_name" });
-          }
-
-          const apiKeys = yield* ApiKeyService;
-          return yield* apiKeys.createUserKey({
-            accountId: session.accountId,
-            organizationId: org.id,
-            name,
-          });
         }),
       )
       .handle("getMcpPaused", ({ params }) =>
@@ -552,20 +515,6 @@ export const CloudSessionAuthHandlers = HttpApiBuilder.group(
             structured: result.structured,
             isError: result.isError ?? false,
           };
-        }),
-      )
-      .handle("revokeApiKey", ({ params }) =>
-        Effect.gen(function* () {
-          const { session, org } = yield* requireSessionOrganization;
-          const apiKeys = yield* ApiKeyService;
-          const ownedKeys = yield* apiKeys.listUserKeys({
-            accountId: session.accountId,
-            organizationId: org.id,
-          });
-          if (!ownedKeys.some((key) => key.id === params.apiKeyId)) {
-            return yield* new ApiKeyManagementError({ cause: "api_key_not_found" });
-          }
-          yield* apiKeys.revokeUserKey({ keyId: params.apiKeyId });
         }),
       ),
 );

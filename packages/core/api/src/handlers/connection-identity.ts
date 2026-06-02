@@ -1,13 +1,11 @@
 import { Data, Duration, Effect, Exit, Option, Predicate, Schema, type Layer } from "effect";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http";
 
+import { OAUTH2_PROVIDER_KEY, OAuthProviderStateSchema, type Executor } from "@executor-js/sdk";
 import {
   OAUTH2_DEFAULT_TIMEOUT_MS,
-  OAUTH2_PROVIDER_KEY,
-  OAuthProviderStateSchema,
   assertSupportedOAuthEndpointUrl,
-  type Executor,
-} from "@executor-js/sdk";
+} from "@executor-js/sdk/host-internal";
 import type { ConnectionId, ScopeId } from "@executor-js/sdk/shared";
 
 import type { ConnectionIdentityResponse } from "../connections/api";

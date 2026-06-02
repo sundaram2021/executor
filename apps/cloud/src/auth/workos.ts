@@ -106,7 +106,7 @@ export const collectRawWorkOSList = async (
   };
 };
 
-class WorkOSAuthConfigurationError extends Data.TaggedError("WorkOSAuthConfigurationError")<{
+class WorkOSConfigurationError extends Data.TaggedError("WorkOSConfigurationError")<{
   readonly message: string;
 }> {}
 
@@ -120,7 +120,7 @@ const make = Effect.gen(function* () {
   const cookiePassword = env.WORKOS_COOKIE_PASSWORD;
 
   if (!cookiePassword || cookiePassword.length < 32) {
-    return yield* new WorkOSAuthConfigurationError({
+    return yield* new WorkOSConfigurationError({
       message: INVALID_COOKIE_PASSWORD_MESSAGE,
     });
   }
@@ -403,15 +403,26 @@ const make = Effect.gen(function* () {
   };
 });
 
-export type WorkOSAuthService = Effect.Success<typeof make>;
+export type WorkOSClientService = Effect.Success<typeof make>;
 
-export class WorkOSAuth extends Context.Service<WorkOSAuth, WorkOSAuthService>()(
-  "@executor-js/cloud/WorkOSAuth",
+export class WorkOSClient extends Context.Service<WorkOSClient, WorkOSClientService>()(
+  "@executor-js/cloud/WorkOSClient",
 ) {
   static Default = Layer.effect(this)(make).pipe(
-    Layer.withSpan("WorkOSAuth", { attributes: { module: "WorkOSAuth" } }),
+    Layer.withSpan("WorkOSClient", { attributes: { module: "WorkOSClient" } }),
   );
 }
+
+// The boot-scoped WorkOS client root — the one neutral service the stateless
+// HTTP path AND the MCP session Durable Object both build on (each merges it
+// with its own DB + telemetry layers). Named here, beside the client it aliases,
+// so a focused backend consumer (the DO, the miniflare test worker) imports just
+// this root rather than the whole `api/layers.ts` HTTP assembly. It names NO
+// billing service, so the DO — which never bills — does not transitively require
+// one. (This used to live in a standalone `api/core-shared-services.ts` purely to
+// keep `@tanstack/react-start` out of the DO bundle; that coupling is gone now
+// that `handlers.ts` no longer imports react-start, so the alias moved home.)
+export const CoreSharedServices = WorkOSClient.Default;
 
 const parseCookie = (cookieHeader: string | null, name: string): string | null => {
   if (!cookieHeader) return null;

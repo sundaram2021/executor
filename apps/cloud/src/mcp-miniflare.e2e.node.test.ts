@@ -33,7 +33,7 @@ import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { unstable_dev, type Unstable_DevWorker } from "wrangler";
 import { serveOpenApiHttpApiTestServer } from "@executor-js/plugin-openapi/testing";
 
-import { makeTestBearer } from "./test-bearer";
+import { makeTestBearer } from "./testing/test-bearer";
 
 // ---------------------------------------------------------------------------
 // Upstream test API — declared once via Effect's `HttpApi` so the spec the
@@ -116,7 +116,7 @@ const UpstreamLive = Layer.effect(
 
 // ---------------------------------------------------------------------------
 // Telemetry receiver — a node HTTP server on a random port that speaks
-// OTLP/JSON. The Effect OTLPTraceExporter in `services/telemetry.ts`
+// OTLP/JSON. The Effect OTLPTraceExporter in `observability/telemetry.ts`
 // posts JSON bodies to it (confirmed via
 // `@opentelemetry/exporter-trace-otlp-http` — `Content-Type:
 // application/json` + `JsonTraceSerializer`). We parse resourceSpans →
@@ -276,7 +276,7 @@ const WorkerLive = Layer.effect(Worker)(
     // become observable in the test process.
     return yield* Effect.acquireRelease(
       Effect.promise(() =>
-        unstable_dev(resolve(__dirname, "./test-worker.ts"), {
+        unstable_dev(resolve(__dirname, "./testing/test-worker.ts"), {
           config: resolve(__dirname, "../wrangler.miniflare.jsonc"),
           experimental: { disableExperimentalWarning: true },
           ip: "127.0.0.1",
@@ -465,7 +465,14 @@ layer(TestEnv, { timeout: 60_000 })("cloud MCP over real HTTP (miniflare)", (it)
           "https://test-resource.example.com/.well-known/oauth-protected-resource/mcp",
         );
         const body = yield* Effect.promise(() => response.json());
-        expect(body).toEqual({ error: "unauthorized" });
+        // Envelope canonicalizes the 401 body to a JSON-RPC error; the
+        // WWW-Authenticate challenge (asserted above) stays byte-for-byte via
+        // the provider's reason-sensitive Unauthorized.challenge.
+        expect(body).toEqual({
+          jsonrpc: "2.0",
+          error: { code: -32001, message: "Unauthorized" },
+          id: null,
+        });
       }),
     30_000,
   );
@@ -475,10 +482,10 @@ layer(TestEnv, { timeout: 60_000 })("cloud MCP over real HTTP (miniflare)", (it)
     () =>
       Effect.gen(function* () {
         const { baseUrl, seedOrg } = yield* Worker;
-        const orgId = nextOrgId();
-        yield* Effect.promise(() => seedOrg(orgId, "Miniflare Org"));
+        const organizationId = nextOrgId();
+        yield* Effect.promise(() => seedOrg(organizationId, "Miniflare Org"));
         const client = yield* Effect.promise(() =>
-          connectClient(baseUrl, makeTestBearer(nextAccountId(), orgId)),
+          connectClient(baseUrl, makeTestBearer(nextAccountId(), organizationId)),
         );
         expect(client.getServerVersion()?.name).toBe("executor");
         yield* Effect.promise(() => client.close());
@@ -491,10 +498,10 @@ layer(TestEnv, { timeout: 60_000 })("cloud MCP over real HTTP (miniflare)", (it)
     () =>
       Effect.gen(function* () {
         const { baseUrl, seedOrg } = yield* Worker;
-        const orgId = nextOrgId();
-        yield* Effect.promise(() => seedOrg(orgId, "List Tools Org"));
+        const organizationId = nextOrgId();
+        yield* Effect.promise(() => seedOrg(organizationId, "List Tools Org"));
         const client = yield* Effect.promise(() =>
-          connectClient(baseUrl, makeTestBearer(nextAccountId(), orgId)),
+          connectClient(baseUrl, makeTestBearer(nextAccountId(), organizationId)),
         );
         const { tools } = yield* Effect.promise(() => client.listTools());
         expect(tools.map((t) => t.name)).toContain("execute");
@@ -508,10 +515,10 @@ layer(TestEnv, { timeout: 60_000 })("cloud MCP over real HTTP (miniflare)", (it)
     () =>
       Effect.gen(function* () {
         const { baseUrl, seedOrg } = yield* Worker;
-        const orgId = nextOrgId();
-        yield* Effect.promise(() => seedOrg(orgId, "Execute Org"));
+        const organizationId = nextOrgId();
+        yield* Effect.promise(() => seedOrg(organizationId, "Execute Org"));
         const client = yield* Effect.promise(() =>
-          connectClient(baseUrl, makeTestBearer(nextAccountId(), orgId)),
+          connectClient(baseUrl, makeTestBearer(nextAccountId(), organizationId)),
         );
         const result = yield* Effect.promise(() =>
           client.callTool({ name: "execute", arguments: { code: "return 1 + 2" } }),
@@ -529,9 +536,9 @@ layer(TestEnv, { timeout: 60_000 })("cloud MCP over real HTTP (miniflare)", (it)
     () =>
       Effect.gen(function* () {
         const { baseUrl, seedOrg } = yield* Worker;
-        const orgId = nextOrgId();
-        const bearer = makeTestBearer(nextAccountId(), orgId);
-        yield* Effect.promise(() => seedOrg(orgId, "Duplicate SSE Org"));
+        const organizationId = nextOrgId();
+        const bearer = makeTestBearer(nextAccountId(), organizationId);
+        yield* Effect.promise(() => seedOrg(organizationId, "Duplicate SSE Org"));
         const sessionId = yield* Effect.promise(() => initializeSession(baseUrl, bearer));
 
         const getHeaders = {
@@ -562,9 +569,9 @@ layer(TestEnv, { timeout: 60_000 })("cloud MCP over real HTTP (miniflare)", (it)
     () =>
       Effect.gen(function* () {
         const { baseUrl, seedOrg } = yield* Worker;
-        const orgId = nextOrgId();
-        const bearer = makeTestBearer(nextAccountId(), orgId);
-        yield* Effect.promise(() => seedOrg(orgId, "Invalid SSE Replacement Org"));
+        const organizationId = nextOrgId();
+        const bearer = makeTestBearer(nextAccountId(), organizationId);
+        yield* Effect.promise(() => seedOrg(organizationId, "Invalid SSE Replacement Org"));
         const sessionId = yield* Effect.promise(() => initializeSession(baseUrl, bearer));
 
         const getHeaders = {
@@ -607,9 +614,9 @@ layer(TestEnv, { timeout: 60_000 })("cloud MCP over real HTTP (miniflare)", (it)
     () =>
       Effect.gen(function* () {
         const { baseUrl, seedOrg } = yield* Worker;
-        const orgId = nextOrgId();
-        const bearer = makeTestBearer(nextAccountId(), orgId);
-        yield* Effect.promise(() => seedOrg(orgId, "SSE Reconnect Churn Org"));
+        const organizationId = nextOrgId();
+        const bearer = makeTestBearer(nextAccountId(), organizationId);
+        yield* Effect.promise(() => seedOrg(organizationId, "SSE Reconnect Churn Org"));
         const sessionId = yield* Effect.promise(() => initializeSession(baseUrl, bearer));
 
         const getHeaders = {
@@ -688,9 +695,9 @@ layer(TestEnv, { timeout: 60_000 })("cloud MCP over real HTTP (miniflare)", (it)
     () =>
       Effect.gen(function* () {
         const { baseUrl, seedOrg } = yield* Worker;
-        const orgId = nextOrgId();
-        const bearer = makeTestBearer(nextAccountId(), orgId);
-        yield* Effect.promise(() => seedOrg(orgId, "Overlapping Request Id Org"));
+        const organizationId = nextOrgId();
+        const bearer = makeTestBearer(nextAccountId(), organizationId);
+        yield* Effect.promise(() => seedOrg(organizationId, "Overlapping Request Id Org"));
         const sessionId = yield* Effect.promise(() => initializeSession(baseUrl, bearer));
 
         const postExecute = (code: string) =>
@@ -757,11 +764,11 @@ layer(TestEnv, { timeout: 60_000 })("cloud MCP over real HTTP (miniflare)", (it)
       Effect.gen(function* () {
         const { baseUrl, seedOrg } = yield* Worker;
         const { baseUrl: upstreamBaseUrl, specJson } = yield* Upstream;
-        const orgId = nextOrgId();
-        yield* Effect.promise(() => seedOrg(orgId, "Elicit Org"));
+        const organizationId = nextOrgId();
+        yield* Effect.promise(() => seedOrg(organizationId, "Elicit Org"));
 
         const client = yield* Effect.promise(() =>
-          connectClient(baseUrl, makeTestBearer(nextAccountId(), orgId), {
+          connectClient(baseUrl, makeTestBearer(nextAccountId(), organizationId), {
             withElicitation: true,
             elicitationMode: "native",
           }),
@@ -807,10 +814,10 @@ layer(TestEnv, { timeout: 60_000 })("cloud MCP over real HTTP (miniflare)", (it)
       Effect.gen(function* () {
         const { baseUrl, seedOrg } = yield* Worker;
         const receiver = yield* TelemetryReceiver;
-        const orgId = nextOrgId();
-        yield* Effect.promise(() => seedOrg(orgId, "Telemetry Org"));
+        const organizationId = nextOrgId();
+        yield* Effect.promise(() => seedOrg(organizationId, "Telemetry Org"));
         const client = yield* Effect.promise(() =>
-          connectClient(baseUrl, makeTestBearer(nextAccountId(), orgId)),
+          connectClient(baseUrl, makeTestBearer(nextAccountId(), organizationId)),
         );
         // Trigger the DO through a multi-step flow so we can assert that
         // handleRequest spans are reported for every DO hit, not just init.
@@ -850,17 +857,17 @@ layer(TestEnv, { timeout: 60_000 })("cloud MCP request-id telemetry", (it) => {
       Effect.gen(function* () {
         const { baseUrl, seedOrg } = yield* Worker;
         const receiver = yield* TelemetryReceiver;
-        const orgId = nextOrgId();
+        const organizationId = nextOrgId();
         const accountId = nextAccountId();
         const requestId = `req_${crypto.randomUUID().replace(/-/g, "")}`;
-        yield* Effect.promise(() => seedOrg(orgId, "Request Id Org"));
+        yield* Effect.promise(() => seedOrg(organizationId, "Request Id Org"));
 
         const response = yield* Effect.promise(() =>
           fetch(new URL("/mcp", baseUrl), {
             method: "POST",
             headers: {
               accept: "application/json, text/event-stream",
-              authorization: `Bearer ${makeTestBearer(accountId, orgId)}`,
+              authorization: `Bearer ${makeTestBearer(accountId, organizationId)}`,
               "content-type": "application/json",
             },
             body: JSON.stringify({

@@ -134,12 +134,12 @@ import type { Scope } from "./scope";
 import { RemoveSecretInput, SecretRef, SetSecretInput, type SecretProvider } from "./secrets";
 import { Usage } from "./usages";
 import {
-  ToolSchema,
+  ToolSchemaView,
   type RefreshSourceInput,
   type RemoveSourceInput,
   type Source,
   type SourceDetectionResult,
-  type Tool,
+  type ToolView,
   type ToolListFilter,
 } from "./types";
 import { buildToolTypeScriptPreview, type ToolTypeScriptPreview } from "./schema-types";
@@ -199,11 +199,11 @@ export type Executor<TPlugins extends readonly AnyPlugin[] = readonly []> = {
   readonly scopes: readonly Scope[];
 
   readonly tools: {
-    readonly list: (filter?: ToolListFilter) => Effect.Effect<readonly Tool[], StorageFailure>;
+    readonly list: (filter?: ToolListFilter) => Effect.Effect<readonly ToolView[], StorageFailure>;
     /** Fetch a tool's schema view: JSON schemas with `$defs`
      *  attached from the core `definition` table, plus TypeScript
      *  preview strings. Returns `null` for unknown tool ids. */
-    readonly schema: (toolId: string) => Effect.Effect<ToolSchema | null, StorageFailure>;
+    readonly schema: (toolId: string) => Effect.Effect<ToolSchemaView | null, StorageFailure>;
     /** Every `$defs` entry across every source, grouped by source id.
      *  Used for bulk schema export and downstream TypeScript rendering. */
     readonly definitions: () => Effect.Effect<
@@ -433,19 +433,24 @@ export interface ExecutorConfig<TPlugins extends readonly AnyPlugin[] = readonly
    *
    * Omit to skip registration (tests, MCP-only hosts that don't
    * surface a web UI, etc.).
+   *
+   * `webBaseUrl` is optional: a host that can't know its public URL at boot (a
+   * Worker has no static URL var) leaves it unset and derives it per request.
+   * The browser-handoff tools (`secrets.create`, OAuth callback) fail clearly if
+   * it is still absent when actually invoked.
    */
   readonly coreTools?: {
-    readonly webBaseUrl: string;
+    readonly webBaseUrl?: string;
   };
 }
 
 // ---------------------------------------------------------------------------
 // collectTables — return the executor-owned Fuma table set. Plugins persist
 // through host-owned facades (`pluginStorage`, `blobs`) instead of contributing
-// table definitions.
+// table definitions, so the schema is fixed and plugin-independent.
 // ---------------------------------------------------------------------------
 
-export const collectTables = (_plugins: readonly AnyPlugin[]): FumaTables => {
+export const collectTables = (): FumaTables => {
   validateExecutorScopePolicyTables(coreSchema);
   return { ...coreSchema };
 };
@@ -489,7 +494,7 @@ const createDefaultMemoryDb = (tables: FumaTables): ExecutorDb => {
     schemas: [latestSchema],
   });
 
-  // oxlint-disable-next-line executor/no-double-cast -- boundary: dynamic plugin table map is known only after collectTables()
+  // oxlint-disable-next-line executor/no-double-cast -- boundary: fumadb's generic ORM client type doesn't structurally match the FumaDb facade
   const db = factory.client(memoryAdapter()).orm(version) as unknown as FumaDb;
   return {
     db,
@@ -539,7 +544,7 @@ const decodeJsonColumn = (value: unknown): unknown => {
 const decodeProviderState = Schema.decodeUnknownOption(ConnectionProviderState);
 const decodeConnectionIdentityOverride = Schema.decodeUnknownOption(ConnectionIdentityOverride);
 
-const rowToTool = (row: ToolRow, annotations?: ToolAnnotations): Tool => ({
+const rowToTool = (row: ToolRow, annotations?: ToolAnnotations): ToolView => ({
   id: row.id,
   sourceId: row.source_id,
   pluginId: row.plugin_id,
@@ -554,7 +559,7 @@ const staticDeclToTool = (
   source: StaticSourceDecl,
   tool: StaticToolDecl,
   pluginId: string,
-): Tool => ({
+): ToolView => ({
   id: `${source.id}.${tool.name}`,
   sourceId: source.id,
   pluginId,
@@ -1288,7 +1293,7 @@ const writeDefinitions = (
 // so `tools.list({ query, sourceId })` matches across both.
 // ---------------------------------------------------------------------------
 
-const toolMatchesFilter = (tool: Tool, filter: ToolListFilter): boolean => {
+const toolMatchesFilter = (tool: ToolView, filter: ToolListFilter): boolean => {
   if (filter.sourceId && tool.sourceId !== filter.sourceId) return false;
   if (filter.query) {
     const q = filter.query.toLowerCase();
@@ -1355,7 +1360,7 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
       : (userPlugins as readonly AnyPlugin[]);
 
     const tables = yield* Effect.try({
-      try: () => collectTables(plugins),
+      try: () => collectTables(),
       catch: (cause) => storageFailureFromUnknown("Failed to collect executor tables", cause),
     });
     const dbInput = yield* Effect.suspend(() => {
@@ -3712,7 +3717,7 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
                 Effect.withSpan("executor.tools.list.annotations"),
               );
 
-        const out: Tool[] = [];
+        const out: ToolView[] = [];
         // Static tools — annotations from the declaration, not a resolver.
         for (const entry of staticTools.values()) {
           out.push(staticDeclToTool(entry.source, entry.tool, entry.pluginId));
@@ -3731,7 +3736,7 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
         if (filter?.includeBlocked !== true) {
           const policies = yield* loadAllPolicies();
           if (policies.length > 0) {
-            const kept: Tool[] = [];
+            const kept: ToolView[] = [];
             for (const tool of filtered) {
               const match = resolveToolPolicy(tool.id, policies, scopeRank);
               if (match?.action === "block") {
@@ -3775,7 +3780,7 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
         return out;
       });
 
-    // Render the ToolSchema view for a tool. Raw JSON schema roots stay small,
+    // Render the ToolSchemaView view for a tool. Raw JSON schema roots stay small,
     // while source-level definitions are returned once for the UI schema
     // explorer and passed separately to the TypeScript preview compiler.
     const buildToolSchemaView = (opts: {
@@ -3817,7 +3822,7 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
           }),
         );
 
-        return ToolSchema.make({
+        return ToolSchemaView.make({
           id: ToolId.make(opts.toolId),
           name: opts.name,
           description: opts.description,
@@ -4279,8 +4284,12 @@ export const createExecutor = <const TPlugins extends readonly AnyPlugin[] = rea
     const secretsStatus = (id: string): Effect.Effect<"resolved" | "missing", StorageFailure> =>
       Effect.gen(function* () {
         const rows = yield* secretRowsForId(id);
-        if (rows.some((row) => row.owned_by_connection_id)) return "missing";
+        // Connection-owned rows are managed through their connection, not the
+        // picker — skip them (as `secretsList` does) rather than letting one
+        // poison the whole status. A co-existing org-default value still
+        // resolves the secret.
         for (const row of rows) {
+          if (row.owned_by_connection_id) continue;
           if (yield* secretRouteHasBackingValue(row)) return "resolved";
         }
 
