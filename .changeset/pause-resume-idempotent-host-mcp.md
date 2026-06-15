@@ -1,5 +1,5 @@
 ---
-"@executor-js/execution": patch
+"@executor-js/host-mcp": patch
 ---
 
 Make paused-execution resume reliable: `resume` is now idempotent (a retried
