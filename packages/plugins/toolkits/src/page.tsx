@@ -102,6 +102,7 @@ const createToolkitPolicy = ToolkitsClient.mutation("toolkits", "createPolicy");
 const updateToolkitPolicy = ToolkitsClient.mutation("toolkits", "updatePolicy");
 const removeToolkitPolicy = ToolkitsClient.mutation("toolkits", "removePolicy");
 const createToolkitConnection = ToolkitsClient.mutation("toolkits", "createConnection");
+const removeToolkitConnection = ToolkitsClient.mutation("toolkits", "removeConnection");
 
 type ToolRow = {
   readonly address: ToolAddress;
@@ -176,6 +177,14 @@ const toolkitScopeLabel = (toolkit: ToolkitResponse): string =>
 const compareToolkitRows = (a: ToolkitResponse, b: ToolkitResponse): number => {
   if (a.updatedAt !== b.updatedAt) return b.updatedAt - a.updatedAt;
   return a.name.localeCompare(b.name);
+};
+
+const toolkitByRouteSlug = (
+  toolkits: readonly ToolkitResponse[],
+  slug: string,
+): ToolkitResponse | null => {
+  const matches = toolkits.filter((toolkit) => toolkit.slug === slug);
+  return matches.find((toolkit) => toolkit.owner === "org") ?? matches[0] ?? null;
 };
 
 const toolkitCardStyle = { minHeight: "9rem" };
@@ -297,7 +306,7 @@ const compareTools = (a: ToolRow, b: ToolRow): number =>
   String(a.name).localeCompare(String(b.name)) || toolMatchId(a).localeCompare(toolMatchId(b));
 
 const connectionTitle = (group: ToolkitConnectionGroup): string =>
-  `${group.integration} / ${group.connection}`;
+  `${ownerLabel(group.owner)} ${group.integration} / ${group.connection}`;
 
 const connectionDisplayTitle = (group: ToolkitConnectionGroup, meta: IntegrationMeta): string =>
   group.connection === "built-in" || group.connection === "default" ? meta.name : group.connection;
@@ -329,6 +338,47 @@ const integrationMetaFor = (
     ...(source.url ? { url: source.url } : {}),
   };
 };
+
+type ConfiguredConnectionView = {
+  readonly id: string;
+  readonly title: string;
+  readonly subtitle: string;
+  readonly pattern: string;
+  readonly sourceId: string;
+  readonly icon?: string | null;
+  readonly url?: string;
+};
+
+const configuredConnectionViews = (
+  connections: readonly ToolkitConnectionResponse[],
+  connectionGroups: readonly ToolkitConnectionGroup[],
+  integrations: readonly Integration[],
+  integrationPlugins: readonly IntegrationPlugin[],
+): readonly ConfiguredConnectionView[] =>
+  connections.map((connection) => {
+    const group = connectionGroups.find((candidate) =>
+      candidate.patterns.includes(connection.pattern),
+    );
+    if (!group) {
+      return {
+        id: connection.id,
+        title: connection.pattern,
+        subtitle: "Configured pattern",
+        pattern: connection.pattern,
+        sourceId: connection.pattern.split(".")[0] ?? "toolkit",
+      };
+    }
+    const meta = integrationMetaFor(group, integrations, integrationPlugins);
+    return {
+      id: connection.id,
+      title: connectionDisplayTitle(group, meta),
+      subtitle: `${ownerLabel(group.owner)} · ${connectionDisplaySubtitle(group, meta)}`,
+      pattern: connection.pattern,
+      sourceId: meta.sourceId,
+      icon: meta.icon,
+      ...(meta.url ? { url: meta.url } : {}),
+    };
+  });
 
 const legacyConnectionPolicyIds = (
   policies: readonly ToolkitPolicyResponse[],
@@ -589,11 +639,66 @@ function ToolkitContentsEmpty(props: { onAddConnection: () => void }) {
   );
 }
 
+function ToolkitConfiguredConnections(props: {
+  connections: readonly ConfiguredConnectionView[];
+  onRemoveConnection: (connectionId: string) => void;
+}) {
+  if (props.connections.length === 0) return null;
+  return (
+    <div className="border-b border-border/60 bg-background/60 px-3 py-2">
+      <div className="mb-1.5 flex items-center justify-between gap-2">
+        <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
+          Connections
+        </span>
+        <span className="text-xs tabular-nums text-muted-foreground">
+          {props.connections.length}
+        </span>
+      </div>
+      <div className="space-y-1">
+        {props.connections.map((connection) => (
+          <div
+            key={connection.id}
+            className="group flex min-w-0 items-center gap-2 rounded-md border border-border/60 bg-card px-2 py-1.5"
+          >
+            <span className="flex size-7 shrink-0 items-center justify-center rounded-md border border-border/70 bg-muted/30">
+              <IntegrationFavicon
+                icon={connection.icon}
+                sourceId={connection.sourceId}
+                url={connection.url}
+                size={16}
+              />
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-xs font-medium text-foreground">{connection.title}</div>
+              <div className="truncate text-[11px] text-muted-foreground">
+                {connection.subtitle}
+              </div>
+            </div>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              aria-label={`Remove connection ${connection.title} from toolkit`}
+              title="Remove connection"
+              onClick={() => props.onRemoveConnection(connection.id)}
+              className="size-6 shrink-0 text-muted-foreground hover:text-destructive"
+            >
+              <Trash2Icon className="size-3.5" />
+            </Button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function ToolkitToolsPanel(props: {
   tools: readonly ToolSummary[];
+  configuredConnections: readonly ConfiguredConnectionView[];
   selectedToolId: string | null;
   policies: readonly ToolkitPolicyResponse[];
   onAddConnection: () => void;
+  onRemoveConnection: (connectionId: string) => void;
   onSelectTool: (toolId: string) => void;
   onSetPolicy: (pattern: string, action: ToolPolicyAction) => void;
   onClearPolicy: (pattern: string) => void;
@@ -627,6 +732,10 @@ function ToolkitToolsPanel(props: {
           </Button>
         </div>
       </div>
+      <ToolkitConfiguredConnections
+        connections={props.configuredConnections}
+        onRemoveConnection={props.onRemoveConnection}
+      />
       {props.tools.length === 0 ? (
         <ToolkitContentsEmpty onAddConnection={props.onAddConnection} />
       ) : (
@@ -874,6 +983,7 @@ function ToolkitWorkspace(props: {
   onBack: () => void;
   onRemoveToolkit: () => void;
   onAddConnection: (pattern: string) => Promise<void> | void;
+  onRemoveConnection: (connectionId: string) => Promise<void> | void;
   onSetPolicy: (pattern: string, action: ToolPolicyAction) => Promise<void> | void;
   onClearPolicy: (pattern: string) => Promise<void> | void;
 }) {
@@ -884,6 +994,16 @@ function ToolkitWorkspace(props: {
     [props.toolkit, props.tools],
   );
   const connectionGroups = useMemo(() => buildConnectionGroups(visibleTools), [visibleTools]);
+  const configuredConnections = useMemo(
+    () =>
+      configuredConnectionViews(
+        props.connections,
+        connectionGroups,
+        props.integrations,
+        props.integrationPlugins,
+      ),
+    [connectionGroups, props.connections, props.integrationPlugins, props.integrations],
+  );
   const legacyPolicyIds = useMemo(
     () => legacyConnectionPolicyIds(props.policies, connectionGroups, props.connections),
     [connectionGroups, props.connections, props.policies],
@@ -920,6 +1040,7 @@ function ToolkitWorkspace(props: {
           policy: resolveToolkitPolicy(id, accessPolicies, tool.requiresApproval),
           owner: toolOwner(tool),
           connection: toolConnectionName(tool),
+          integration: String(tool.integration),
         };
       }),
     [accessPolicies, configuredTools],
@@ -953,9 +1074,11 @@ function ToolkitWorkspace(props: {
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <ToolkitToolsPanel
           tools={toolkitTools}
+          configuredConnections={configuredConnections}
           selectedToolId={selectedToolId}
           policies={accessPolicies}
           onAddConnection={() => setAddOpen(true)}
+          onRemoveConnection={(connectionId) => void props.onRemoveConnection(connectionId)}
           onSelectTool={setSelectedToolId}
           onSetPolicy={(pattern, action) => void props.onSetPolicy(pattern, action)}
           onClearPolicy={(pattern) => void props.onClearPolicy(pattern)}
@@ -1024,6 +1147,7 @@ function ToolkitDetailView(props: {
   const doUpdatePolicy = useAtomSet(updateToolkitPolicy, { mode: "promiseExit" });
   const doRemovePolicy = useAtomSet(removeToolkitPolicy, { mode: "promiseExit" });
   const doCreateConnection = useAtomSet(createToolkitConnection, { mode: "promiseExit" });
+  const doRemoveConnection = useAtomSet(removeToolkitConnection, { mode: "promiseExit" });
   const policyRows = AsyncResult.isSuccess(policies) ? policies.value.policies : [];
   const connectionRows = AsyncResult.isSuccess(connections) ? connections.value.connections : [];
 
@@ -1048,6 +1172,13 @@ function ToolkitDetailView(props: {
     await doCreateConnection({
       params: { toolkitId: props.toolkit.id },
       payload: { pattern },
+      reactivityKeys: toolkitWriteKeys,
+    });
+  };
+
+  const removeConnectionHandler = async (connectionId: string) => {
+    await doRemoveConnection({
+      params: { toolkitId: props.toolkit.id, connectionId },
       reactivityKeys: toolkitWriteKeys,
     });
   };
@@ -1080,6 +1211,7 @@ function ToolkitDetailView(props: {
       onBack={props.onBack}
       onRemoveToolkit={() => props.onRemoveToolkit(props.toolkit)}
       onAddConnection={addConnectionHandler}
+      onRemoveConnection={removeConnectionHandler}
       onSetPolicy={setPolicyHandler}
       onClearPolicy={clearPolicyHandler}
     />
@@ -1101,7 +1233,7 @@ export function ToolkitsPage(props: PluginPageProps) {
   const selectedToolkit =
     selectedToolkitSlug === null
       ? null
-      : (toolkitRows.find((toolkit) => toolkit.slug === selectedToolkitSlug) ?? null);
+      : toolkitByRouteSlug(toolkitRows, selectedToolkitSlug);
 
   const toolRows = AsyncResult.isSuccess(tools) ? (tools.value as readonly ToolRow[]) : [];
   const integrationRows = AsyncResult.isSuccess(integrations)

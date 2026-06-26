@@ -156,18 +156,16 @@ const resolveToolkitPolicy = (
   policies: readonly ToolkitPolicyRecord[],
   defaultRequiresApproval?: boolean,
 ): EffectivePolicy => {
-  const legacyConnectionPolicyIds = new Set(
-    policies.filter(isLegacyConnectionPolicy).map((policy) => policy.id),
-  );
+  const legacyPolicyIds = legacyConnectionPolicyIds(policies, connections);
   const connected =
     connections.some((connection) => matchPattern(connection.pattern, toolId)) ||
     policies.some(
-      (policy) => legacyConnectionPolicyIds.has(policy.id) && matchPattern(policy.pattern, toolId),
+      (policy) => legacyPolicyIds.has(policy.id) && matchPattern(policy.pattern, toolId),
     );
   if (!connected) return blockedPolicy();
 
   for (const policy of [...policies].sort(comparePositioned)) {
-    if (legacyConnectionPolicyIds.has(policy.id)) continue;
+    if (legacyPolicyIds.has(policy.id)) continue;
     if (!matchPattern(policy.pattern, toolId)) continue;
     return {
       action: policy.action,
@@ -177,6 +175,20 @@ const resolveToolkitPolicy = (
     };
   }
   return pluginDefaultPolicy(defaultRequiresApproval);
+};
+
+const legacyConnectionPolicyIds = (
+  policies: readonly ToolkitPolicyRecord[],
+  connections: readonly ToolkitConnectionRecord[],
+): ReadonlySet<string> => {
+  const connectionPatterns = new Set(connections.map((connection) => connection.pattern));
+  return new Set(
+    policies
+      .filter(
+        (policy) => isLegacyConnectionPolicy(policy) && !connectionPatterns.has(policy.pattern),
+      )
+      .map((policy) => policy.id),
+  );
 };
 
 const isPersonalDynamicToolId = (toolId: string): boolean => toolId.split(".")[1] === "user";
@@ -237,7 +249,9 @@ const makeToolkitsExtension = (ctx: PluginCtx<ToolkitStorage>) => {
   const getEntry = (toolkitId: string) => storage.toolkits.get({ key: toolkitId });
 
   const getBySlugEntry = (slug: string) =>
-    storage.toolkits.query({ where: { slug } }).pipe(Effect.map((entries) => entries[0] ?? null));
+    storage.toolkits.query({ where: { slug } }).pipe(
+      Effect.map((entries) => entries.find((entry) => entry.owner === "org") ?? entries[0] ?? null),
+    );
 
   const requireToolkit = (toolkitId: string) =>
     getEntry(toolkitId).pipe(
@@ -465,8 +479,10 @@ const makeToolkitsExtension = (ctx: PluginCtx<ToolkitStorage>) => {
       const toolkit = yield* getBySlugEntry(slug);
       if (!toolkit) return [];
       const policies = yield* listPoliciesForRecord(toolkit.data.id);
+      const connections = yield* listConnectionsForRecord(toolkit.data.id);
+      const legacyPolicyIds = legacyConnectionPolicyIds(policies, connections);
       return policies
-        .filter((policy) => !isLegacyConnectionPolicy(policy))
+        .filter((policy) => !legacyPolicyIds.has(policy.id))
         .map((policy) => ({
           id: policy.id,
           pattern: policy.pattern,

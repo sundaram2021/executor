@@ -15,7 +15,7 @@ describe("stripMcpOrgSegment", () => {
     );
     expect(
       stripMcpOrgSegment("/.well-known/oauth-protected-resource/abc123/mcp/toolkits/deploy"),
-    ).toBe("/.well-known/oauth-protected-resource");
+    ).toBe("/.well-known/oauth-protected-resource/mcp/toolkits/deploy");
   });
 
   it("leaves the bare paths untouched", () => {

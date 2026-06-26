@@ -198,17 +198,11 @@ const mcpDispatch = (resource: McpResource) =>
     const sessionId = request.headers.get("mcp-session-id");
 
     // Authenticate (and, for session-aware providers, authorize) on EVERY
-    // request. On a non-Authenticated outcome:
-    //   - Forbidden  -> dispose the live session first (cloud tears down a DO
-    //                   whose org access was revoked), then render the 403. The
-    //                   inbound request is forwarded so the store can propagate
-    //                   the request's W3C trace context onto the teardown RPC.
-    //   - other      -> render directly.
+    // request. Non-authenticated outcomes render directly. Session teardown is
+    // only safe after the store can validate the authenticated principal and MCP
+    // resource; an auth-level Forbidden may not carry either.
     const outcome = yield* auth.authenticate(request);
     if (!Predicate.isTagged(outcome, "Authenticated")) {
-      if (Predicate.isTagged(outcome, "Forbidden") && sessionId) {
-        yield* store.dispose(sessionId, request);
-      }
       return HttpServerResponse.raw(renderAuthError(auth, request, outcome));
     }
     const principal = outcome.principal;

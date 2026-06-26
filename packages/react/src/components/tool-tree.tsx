@@ -41,6 +41,9 @@ export interface ToolSummary {
   /** Name of the connection (account) that produced this tool. Present only in
    *  the account-grouped view; ignored in the flat tree. */
   readonly connection?: string;
+  /** Integration that produced this tool. Used to disambiguate same-name
+   *  connections from different integrations in grouped views. */
+  readonly integration?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -53,9 +56,10 @@ export interface ToolSummary {
 // ---------------------------------------------------------------------------
 
 export type AccountGroup = {
-  /** Stable key `${owner}:${connection}`. */
+  /** Stable key `${owner}:${integration}:${connection}`. */
   readonly key: string;
   readonly owner: Owner;
+  readonly integration: string;
   readonly connection: string;
   /** Section header, e.g. "Personal · axiom-mcp". */
   readonly label: string;
@@ -69,14 +73,18 @@ export type AccountGroup = {
  * Pure — unit-testable without React.
  */
 export const buildAccountGroups = (tools: readonly ToolSummary[]): readonly AccountGroup[] => {
-  const byKey = new Map<string, { owner: Owner; connection: string; tools: ToolSummary[] }>();
+  const byKey = new Map<
+    string,
+    { owner: Owner; integration: string; connection: string; tools: ToolSummary[] }
+  >();
   for (const tool of tools) {
     const owner: Owner = tool.owner ?? "org";
+    const integration = tool.integration ?? "";
     const connection = tool.connection ?? "";
-    const key = `${owner}:${connection}`;
+    const key = `${owner}:${integration}:${connection}`;
     let group = byKey.get(key);
     if (!group) {
-      group = { owner, connection, tools: [] };
+      group = { owner, integration, connection, tools: [] };
       byKey.set(key, group);
     }
     group.tools.push(tool);
@@ -85,14 +93,20 @@ export const buildAccountGroups = (tools: readonly ToolSummary[]): readonly Acco
   const ownerRank = (owner: Owner): number => (owner === "org" ? 0 : 1);
   return [...byKey.values()]
     .sort(
-      (a, b) => ownerRank(a.owner) - ownerRank(b.owner) || a.connection.localeCompare(b.connection),
+      (a, b) =>
+        ownerRank(a.owner) - ownerRank(b.owner) ||
+        a.integration.localeCompare(b.integration) ||
+        a.connection.localeCompare(b.connection),
     )
     .map((group) => ({
-      key: `${group.owner}:${group.connection}`,
+      key: `${group.owner}:${group.integration}:${group.connection}`,
       owner: group.owner,
+      integration: group.integration,
       connection: group.connection,
       label: group.connection
-        ? `${ownerLabel(group.owner)} · ${group.connection}`
+        ? `${ownerLabel(group.owner)} · ${
+            group.integration ? `${group.integration} / ` : ""
+          }${group.connection}`
         : ownerLabel(group.owner),
       tools: group.tools,
     }));
@@ -408,7 +422,9 @@ export function ToolTree(props: {
                   </Badge>
                 ) : null}
                 <span className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground">
-                  {group.connection || ownerDisplay.label(group.owner)}
+                  {group.integration && group.connection
+                    ? `${group.integration} / ${group.connection}`
+                    : group.connection || ownerDisplay.label(group.owner)}
                 </span>
                 <span className="shrink-0 tabular-nums text-xs text-muted-foreground">
                   {group.tools.length}

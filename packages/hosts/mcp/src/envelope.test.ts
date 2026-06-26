@@ -15,6 +15,7 @@ import { HttpRouter, HttpServer } from "effect/unstable/http";
 
 import {
   authenticated,
+  forbidden,
   McpAuthProvider,
   McpErrorReporter,
   McpErrorReporterNoop,
@@ -65,11 +66,12 @@ const OkStoreLive = Layer.succeed(McpSessionStore)({
 const buildHandler = (
   store: Layer.Layer<McpSessionStore>,
   reporter: Layer.Layer<McpErrorReporter>,
+  authProvider: Layer.Layer<McpAuthProvider> = AuthProviderLive,
 ): ((request: Request) => Promise<Response>) => {
-  const Seams = Layer.mergeAll(AuthProviderLive, store, reporter);
+  const Seams = Layer.mergeAll(authProvider, store, reporter);
   const RouteLive = McpServingRoutes.pipe(
     HttpRouter.provideRequest(Seams),
-    Layer.provide(AuthProviderLive),
+    Layer.provide(authProvider),
   );
   return HttpRouter.toWebHandler(RouteLive.pipe(Layer.provideMerge(HttpServer.layerServices)))
     .handler;
@@ -132,6 +134,39 @@ describe("McpServingRoutes envelope", () => {
     const captures = await Effect.runPromise(Ref.get(reported));
     expect(captures).toHaveLength(1);
     expect(captures[0]).toContain("induced defect");
+  });
+
+  it("does not dispose a session id on an auth-level Forbidden outcome", async () => {
+    const disposed = await Effect.runPromise(Ref.make<ReadonlyArray<string>>([]));
+    const ForbiddenAuthProviderLive = Layer.succeed(McpAuthProvider)({
+      discoveryRoutes: [],
+      resourceMetadataUrl: (request) => `${new URL(request.url).origin}${DISCOVERY_PATH}`,
+      authenticate: () => Effect.succeed(forbidden("No organization in session", -32001)),
+    });
+    const RecordingStoreLive = Layer.succeed(McpSessionStore)({
+      dispatch: (): Effect.Effect<McpDispatchResult> => Effect.die("dispatch should not run"),
+      dispose: (sessionId) => Ref.update(disposed, (ids) => [...ids, sessionId]),
+    });
+
+    const handler = buildHandler(
+      RecordingStoreLive,
+      McpErrorReporterNoop,
+      ForbiddenAuthProviderLive,
+    );
+    const response = await handler(
+      new Request("https://host.test/mcp/toolkits/deploy", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer x",
+          "mcp-session-id": "leaked-session",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+      }),
+    );
+
+    expect(response.status).toBe(403);
+    expect(await Effect.runPromise(Ref.get(disposed))).toEqual([]);
   });
 });
 

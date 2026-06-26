@@ -155,6 +155,21 @@ scenario(
           await dialog.waitFor({ state: "hidden" });
         });
 
+        await step("Remove the connection from the toolkit tools list", async () => {
+          await page.getByRole("button", { name: /^Remove connection / }).first().click();
+          await page.getByText("No connections added").waitFor();
+          await page.getByRole("button", { name: "Add connection to toolkit" }).click();
+          const dialog = page.getByRole("dialog", { name: "Add connection" });
+          await dialog.waitFor();
+          await dialog.getByLabel("Search connections and tools").fill("policies.list");
+          await dialog.getByRole("button", { name: /^Add connection / }).first().click();
+          await dialog.waitFor({ state: "hidden" });
+          const toolkitTools = page.getByRole("region", { name: "Toolkit tools" });
+          await toolkitTools.getByLabel("Filter tools").fill("policies.list");
+          await toolkitTools.getByRole("button").filter({ hasText: "list" }).last().waitFor();
+          await toolkitTools.getByLabel("Filter tools").clear();
+        });
+
         await step("Block one tool from the toolkit tools list", async () => {
           const toolkitTools = page.getByRole("region", { name: "Toolkit tools" });
           await toolkitTools.getByLabel("Filter tools").fill("policies.list");

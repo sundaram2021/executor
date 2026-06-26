@@ -22,7 +22,9 @@ const PRM_PREFIX = "/.well-known/oauth-protected-resource";
  *
  *   /<seg>/mcp                                                -> /mcp
  *   /<seg>/mcp/toolkits/<toolkit>                             -> /mcp/toolkits/<toolkit>
- *   /.well-known/oauth-protected-resource/<seg>/mcp[...]      -> /.well-known/oauth-protected-resource
+ *   /.well-known/oauth-protected-resource/<seg>/mcp           -> /.well-known/oauth-protected-resource
+ *   /.well-known/oauth-protected-resource/<seg>/mcp/toolkits/<toolkit>
+ *                                                            -> /.well-known/oauth-protected-resource/mcp/toolkits/<toolkit>
  */
 export const stripMcpOrgSegment = (pathname: string): string | null => {
   if (pathname.startsWith(`${PRM_PREFIX}/`)) {
@@ -31,7 +33,9 @@ export const stripMcpOrgSegment = (pathname: string): string | null => {
       .split("/")
       .filter((segment) => segment.length > 0);
     if (rest.length === 2 && rest[1] === "mcp") return PRM_PREFIX;
-    if (rest.length === 4 && rest[1] === "mcp" && rest[2] === "toolkits") return PRM_PREFIX;
+    if (rest.length === 4 && rest[1] === "mcp" && rest[2] === "toolkits") {
+      return `${PRM_PREFIX}/mcp/toolkits/${rest[3]}`;
+    }
     return null;
   }
   const segments = pathname.split("/").filter((segment) => segment.length > 0);
