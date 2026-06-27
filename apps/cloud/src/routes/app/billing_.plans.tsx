@@ -66,6 +66,12 @@ const ACTION_LABELS: Record<string, string> = {
 
 const PLAN_ORDER = ["free", "team", "enterprise"];
 
+// "14-day free trial", "1-month free trial", etc. — reads the trial config
+// synced from the repo-root autumn.config.ts so copy tracks the plan. The unit
+// stays singular because it reads as a compound adjective ("14-day", "2-month").
+const trialLabel = (freeTrial: NonNullable<Plan["freeTrial"]>): string =>
+  `${freeTrial.durationLength}-${freeTrial.durationType} free trial`;
+
 function PlansPage() {
   const { attach, openCustomerPortal, isLoading: customerLoading } = useCustomer();
   const { data: plans, isLoading: plansLoading, isFetching } = useListPlans();
@@ -127,9 +133,20 @@ function PlansPage() {
               const isCanceling = eligibility?.canceling ?? false;
               const isCurrent = status === "active" && !isCanceling;
               const isScheduled = status === "scheduled";
-              const label = isCanceling ? "Resume" : (ACTION_LABELS[action] ?? "Select");
               const isUpgradeAction = action === "upgrade" || action === "activate";
               const isEnterprise = plan.id === "enterprise";
+              // Offer the trial only when the plan defines one and this customer
+              // is still eligible (trialAvailable is false once they've used it).
+              const freeTrial = plan.freeTrial;
+              const trialOffered =
+                freeTrial != null &&
+                eligibility?.trialAvailable !== false &&
+                (action === "activate" || action === "upgrade");
+              const label = isCanceling
+                ? "Resume"
+                : trialOffered
+                  ? "Start free trial"
+                  : (ACTION_LABELS[action] ?? "Select");
 
               return (
                 <div
@@ -178,6 +195,14 @@ function PlansPage() {
                       <span className="text-sm text-muted-foreground">USD</span>
                     )}
                   </div>
+
+                  {trialOffered && freeTrial && (
+                    <p className="mt-2 text-xs font-medium text-primary">
+                      {trialLabel(freeTrial)}
+                      {plan.price?.amount != null &&
+                        `, then $${plan.price.amount} / ${plan.price.interval ?? "month"}`}
+                    </p>
+                  )}
 
                   <div className="mt-4">
                     {(isCurrent && !isCanceling) || isScheduled ? (
