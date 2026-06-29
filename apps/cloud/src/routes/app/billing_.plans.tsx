@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useCustomer, useListPlans } from "autumn-js/react";
 import { trackEvent } from "@executor-js/react/api/analytics";
@@ -20,6 +20,75 @@ type Plan = NonNullable<ReturnType<typeof useListPlans>["data"]>[number];
 export const Route = createFileRoute("/{-$orgSlug}/billing_/plans")({
   component: PlansPage,
 });
+
+// Marker appended to the checkout success URL so the page knows, on return, that
+// it just came back from Stripe and which plan was attached.
+const CHECKOUT_RETURN_PARAM = "checkout";
+
+/**
+ * Refresh billing data after returning from a redirect checkout.
+ *
+ * autumn-js fetches the customer once on load and does not refetch on its own
+ * (staleTime 60s, no refetch on focus), while Stripe's `checkout.session.completed`
+ * webhook reaches Autumn moments AFTER the browser is redirected back. So the
+ * single fetch on the success page sees the pre-checkout plan and the page would
+ * otherwise show the old plan (and the upgrade CTA) until a manual reload.
+ *
+ * On detecting the return marker, poll the billing data until the attached plan
+ * shows as active (or a timeout). While that reconciliation is in flight this
+ * returns the attached plan id so the page can show that plan as "Activating"
+ * rather than the pre-checkout upgrade CTA, which would otherwise read as if the
+ * purchase did not happen. The marker is stripped immediately so a later manual
+ * reload does not re-arm the poll.
+ *
+ * @returns the plan id being finalized, or null once it reflects (or times out).
+ */
+function useRefreshAfterCheckout(plans: Plan[] | undefined, refetch: () => void): string | null {
+  const [finalizingPlan, setFinalizingPlan] = useState<string | null>(null);
+  const plansRef = useRef(plans);
+  plansRef.current = plans;
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const attachedPlanId = params.get(CHECKOUT_RETURN_PARAM);
+    if (!attachedPlanId) return;
+
+    params.delete(CHECKOUT_RETURN_PARAM);
+    const query = params.toString();
+    window.history.replaceState({}, "", `${window.location.pathname}${query ? `?${query}` : ""}`);
+    setFinalizingPlan(attachedPlanId);
+
+    const reflected = () =>
+      plansRef.current?.find((p) => p.id === attachedPlanId)?.customerEligibility?.status ===
+      "active";
+
+    let elapsed = 0;
+    refetch();
+    const interval = setInterval(() => {
+      elapsed += 1500;
+      if (reflected() || elapsed >= 20_000) {
+        clearInterval(interval);
+        setFinalizingPlan(null);
+        return;
+      }
+      refetch();
+    }, 1500);
+    return () => clearInterval(interval);
+  }, [refetch]);
+
+  // Drop the optimistic state the moment the refetched data reflects the plan,
+  // so it does not linger until the next poll tick after the webhook lands.
+  useEffect(() => {
+    if (
+      finalizingPlan &&
+      plans?.find((p) => p.id === finalizingPlan)?.customerEligibility?.status === "active"
+    ) {
+      setFinalizingPlan(null);
+    }
+  }, [finalizingPlan, plans]);
+
+  return finalizingPlan;
+}
 
 const ENTERPRISE_FEATURES = [
   "Self-hosted or dedicated cloud deployment support",
@@ -67,9 +136,25 @@ const ACTION_LABELS: Record<string, string> = {
 const PLAN_ORDER = ["free", "team", "enterprise"];
 
 function PlansPage() {
-  const { attach, openCustomerPortal, isLoading: customerLoading } = useCustomer();
-  const { data: plans, isLoading: plansLoading, isFetching } = useListPlans();
+  const {
+    attach,
+    openCustomerPortal,
+    isLoading: customerLoading,
+    refetch: refetchCustomer,
+  } = useCustomer();
+  const {
+    data: plans,
+    isLoading: plansLoading,
+    isFetching,
+    refetch: refetchPlans,
+  } = useListPlans();
   const [loadingPlan, setLoadingPlan] = useState<string | null>(null);
+
+  const refetchBilling = useCallback(() => {
+    void refetchCustomer();
+    void refetchPlans();
+  }, [refetchCustomer, refetchPlans]);
+  const finalizingPlan = useRefreshAfterCheckout(plans, refetchBilling);
 
   const isLoading = customerLoading || plansLoading;
 
@@ -129,6 +214,9 @@ function PlansPage() {
               const isScheduled = status === "scheduled";
               const isUpgradeAction = action === "upgrade" || action === "activate";
               const isEnterprise = plan.id === "enterprise";
+              // Just back from checkout for this plan and the webhook has not
+              // landed yet: show it as activating instead of the stale CTA.
+              const isFinalizing = plan.id === finalizingPlan && !isCurrent && !isScheduled;
               // Offer the trial only when the plan defines one and this customer
               // is still eligible (trialAvailable is false once they've used it).
               const freeTrial = plan.freeTrial;
@@ -159,6 +247,9 @@ function PlansPage() {
                       {plan.name}
                     </p>
                     {isCurrent && <Badge className="bg-muted text-foreground">Your plan</Badge>}
+                    {isFinalizing && (
+                      <Badge className="bg-primary/10 text-primary">Activating</Badge>
+                    )}
                     {isCanceling && (
                       <Badge className="bg-muted text-muted-foreground">Canceling</Badge>
                     )}
@@ -184,6 +275,11 @@ function PlansPage() {
                     {(isCurrent && !isCanceling) || isScheduled ? (
                       <div className="flex h-9 items-center justify-center rounded-md border border-border bg-muted/30 text-sm font-medium text-muted-foreground">
                         {isCurrent ? "Current plan" : "Scheduled"}
+                      </div>
+                    ) : isFinalizing ? (
+                      <div className="flex h-9 items-center justify-center gap-2 rounded-md border border-border bg-muted/30 text-sm font-medium text-muted-foreground">
+                        <span className="size-3.5 animate-spin rounded-full border-2 border-muted-foreground/30 border-t-muted-foreground" />
+                        Activating…
                       </div>
                     ) : isEnterprise ? (
                       <EnterpriseContactDialog />
@@ -215,7 +311,11 @@ function PlansPage() {
                             });
                           }
                           setLoadingPlan(plan.id);
-                          await attach({ planId: plan.id, redirectMode: "always" });
+                          // Tag the return URL so the page refetches billing
+                          // data when Stripe redirects back (the webhook that
+                          // activates the plan lands moments after the redirect).
+                          const successUrl = `${window.location.origin}${window.location.pathname}?${CHECKOUT_RETURN_PARAM}=${plan.id}`;
+                          await attach({ planId: plan.id, redirectMode: "always", successUrl });
                           setLoadingPlan(null);
                         }}
                         className={[
